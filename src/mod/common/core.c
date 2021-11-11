@@ -2,6 +2,7 @@
 
 #include "common/config.h"
 #include "mod/common/log.h"
+#include "mod/common/skbuff.h"
 #include "mod/common/trace.h"
 #include "mod/common/translation_state.h"
 #include "mod/common/xlator.h"
@@ -95,6 +96,8 @@ verdict core_4to6(struct sk_buff *skb, struct xlation *state)
 	 * pkt_init_ipv4() HAS pskb_may_pull()ED THEM.
 	 */
 
+	skb_log(skb, "IPv4 packet");
+
 	result = validate_xlator(state);
 	if (result != VERDICT_CONTINUE)
 		goto end;
@@ -146,6 +149,7 @@ verdict core_6to4(struct sk_buff *skb, struct xlation *state)
 	 */
 
 	snapshot_record(&state->in.debug.shot1, skb);
+	skb_log(skb, "IPv6 packet");
 
 	result = validate_xlator(state);
 	if (result != VERDICT_CONTINUE)

@@ -314,12 +314,36 @@ static int print_fraghdr(struct hdr_iterator *meta)
 	return 0;
 }
 
+static void print_bytes(unsigned char *bytes, size_t len)
+{
+	size_t i;
+
+	pr_cont("%zu bytes: ", len);
+
+	/*
+	 * Most (if not all) test skb payloads are monotonic (0, 1, 2, 3, 4,
+	 * 5, ..., 254, 255, 0, 1, 2, 3, ..., 254, 255, 0, 1, etc) and it's
+	 * rare to need to confirm large payloads visually.
+	 * So let's print only a few bytes.
+	 */
+	if (len <= 10) {
+		for (i = 0; i < len; i++)
+			pr_cont("%02x ", bytes[i]);
+
+	} else {
+		for (i = 0; i < 5; i++)
+			pr_cont("%02x ", bytes[i]);
+		pr_cont("(...) ");
+		bytes += len - 5;
+		for (i = 0; i < 5; i++)
+			pr_cont("%02x ", bytes[i]);
+	}
+}
+
 static int print_payload(struct hdr_iterator *meta)
 {
-	unsigned char buffer[10], *payload;
 	unsigned int payload_len;
 	unsigned int tabs = meta->tabs;
-	unsigned int i;
 
 	print(tabs++, "Payload:");
 
@@ -328,49 +352,16 @@ static int print_payload(struct hdr_iterator *meta)
 		return -ENOSPC;
 	}
 
-	payload_len = meta->skb->len - meta->skb_offset;
+	payload_len = skb_headlen(meta->skb) - meta->skb_offset;
 
 	if (payload_len == 0) {
 		print(tabs, "(Empty)");
-		goto success;
-	}
-
-	/*
-	 * Most (if not all) test skb payloads are monotonic (0, 1, 2, 3, 4,
-	 * 5, ..., 254, 255, 0, 1, 2, 3, ..., 254, 255, 0, 1, etc) and it's
-	 * rare to need to confirm large payloads visually.
-	 * So let's print only a few bytes.
-	 */
-	if (payload_len <= 10) {
-		payload = skb_header_pointer(meta->skb, meta->skb_offset,
-				payload_len, buffer);
-		if (!payload)
-			return truncated(tabs);
-		print_tabs(tabs);
-		for (i = 0; i < payload_len; i++)
-			pr_cont("%02x ", payload[i]);
-
 	} else {
-		payload = skb_header_pointer(meta->skb, meta->skb_offset, 5,
-				buffer);
-		if (!payload)
-			return truncated(tabs);
 		print_tabs(tabs);
-		for (i = 0; i < 5; i++)
-			pr_cont("%02x ", payload[i]);
-
-		pr_cont("(...) ");
-
-		payload = skb_header_pointer(meta->skb, meta->skb->len - 5, 5,
-				buffer);
-		if (!payload)
-			return truncated(tabs);
-		for (i = 0; i < 5; i++)
-			pr_cont("%02x ", payload[i]);
+		print_bytes(meta->skb->data + meta->skb_offset, payload_len);
+		pr_cont("\n");
 	}
 
-	pr_cont("\n");
-success:
 	meta->done = true;
 	return 0;
 }
@@ -447,10 +438,40 @@ static void print_headers(struct sk_buff *skb, unsigned int tabs)
 	print_hdr_chain(&meta);
 }
 
+static void print_frags(struct sk_buff *skb, unsigned int tabs)
+{
+	struct skb_shared_info *shinfo;
+	int len;
+	unsigned int f;
+	skb_frag_t *frag;
+	u32 p_off, p_len, copied;
+	int seg_len;
+	struct page *p;
+	u8 *vaddr;
+
+	shinfo = skb_shinfo(skb);
+	len = skb->len - min_t(int, skb_headlen(skb), skb->len);
+	for (f = 0; f < shinfo->nr_frags; f++) {
+		frag = &skb_shinfo(skb)->frags[f];
+
+		skb_frag_foreach_page(frag, skb_frag_off(frag),
+				      skb_frag_size(frag), p, p_off, p_len,
+				      copied) {
+			seg_len = min_t(int, p_len, len);
+			vaddr = kmap_atomic(p);
+			print_tabs(tabs);
+			print_bytes(vaddr + p_off, seg_len);
+			kunmap_atomic(vaddr);
+			len -= seg_len;
+			if (!len)
+				break;
+		}
+	}
+}
+
 static void print_shinfo_fields(struct sk_buff *skb, unsigned int tabs)
 {
 	struct skb_shared_info *shinfo = skb_shinfo(skb);
-	unsigned int f;
 	struct sk_buff *iter;
 
 	print(tabs, "shared info:");
@@ -463,17 +484,7 @@ static void print_shinfo_fields(struct sk_buff *skb, unsigned int tabs)
 	print(tabs, "gso_type:%u", shinfo->gso_type);
 
 	print(tabs, "frags:");
-	tabs++;
-	for (f = 0; f < shinfo->nr_frags; f++) {
-		print(tabs, "%u page_offset:%u size:%u", f,
-#if LINUX_VERSION_AT_LEAST(5, 4, 0, 9999, 0)
-				skb_frag_off(&shinfo->frags[f]),
-#else
-				shinfo->frags[f].page_offset,
-#endif
-				skb_frag_size(&shinfo->frags[f]));
-	}
-	tabs--;
+	print_frags(skb, tabs + 1);
 
 	skb_walk_frags(skb, iter)
 		__skb_log(iter, "frag", tabs);
